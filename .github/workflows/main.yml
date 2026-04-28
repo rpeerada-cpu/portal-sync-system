@@ -1,62 +1,66 @@
-name: Data Sync & Approval System
+name: Secure Data Sync System
 
 on:
   schedule:
-    - cron: '27 1 * * *'
-    - cron: '59 5 * * *'
+    - cron: '27 1 * * *'  # 08:27 น. เวลาไทย
+    - cron: '59 5 * * *'  # 12:59 น. เวลาไทย
   workflow_dispatch:
 
 jobs:
+  # ด่านที่ 1: ตรวจหาไฟล์และทักแชท
   scout-update:
     runs-on: ubuntu-latest
-    permissions: # เพิ่มสิทธิ์ตรงนี้เพื่อให้ Job แรกบันทึก log ได้ถ้าจำเป็น
+    permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with: { python-version: '3.9' }
-      - name: Prepare Environment
+      - name: Setup
         run: |
           pip install playwright requests
           playwright install chromium
-      - name: Run Scouting Mode
+      - name: Run Scout
         env:
           APP_USER: ${{ secrets.PORTAL_USERNAME }}
           APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
           APP_URL: ${{ secrets.TARGET_URL }}
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
           CHAT_WEBHOOK: ${{ secrets.CHAT_WEBHOOK }}
           ACTION_URL: "https://github.com/${{ github.repository }}/actions"
         run: python bot_script.py --mode check
 
+  # ด่านที่ 2: รออนุมัติและส่งเมล
   dispatch-process:
     needs: scout-update
     runs-on: ubuntu-latest
     environment: production
-    permissions: # เพิ่มสิทธิ์ตรงนี้เพื่อให้ Job ส่งเมลบันทึกประวัติลงไฟล์ได้
+    permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with: { python-version: '3.9' }
-      - name: Prepare Environment
+      - name: Setup
         run: |
           pip install playwright requests
           playwright install chromium
-      - name: Run Dispatch Mode
+      - name: Run Dispatch
         env:
           APP_USER: ${{ secrets.PORTAL_USERNAME }}
           APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
           APP_URL: ${{ secrets.TARGET_URL }}
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
           MAIL_USER: ${{ secrets.SENDER_EMAIL }}
           MAIL_PASS: ${{ secrets.SENDER_APP_PASSWORD }}
           MAIL_RECIPIENTS: ${{ secrets.RECIPIENT_LIST }}
           MAIL_SIGNATURE: ${{ secrets.MAIL_SIGNATURE }}
         run: python bot_script.py --mode send
 
-      - name: Sync Log History
+      - name: Save Log (Encrypted)
         run: |
           git config --global user.name "System-Auto-Bot"
           git config --global user.email "bot@github.com"
           git add log_history.txt || true
-          git commit -m "Update logs [skip ci]" || true
+          git commit -m "Sync encrypted logs [skip ci]" || true
           git push
