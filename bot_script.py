@@ -1,10 +1,10 @@
-import os, sys, requests, smtplib, mimetypes
+import os, sys, requests, smtplib, mimetypes, hashlib # เพิ่ม hashlib เข้ามา
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
 from playwright.sync_api import Playwright, sync_playwright
 
-# ดึงข้อมูลจาก GitHub Secrets
+# Configuration
 USER_ID = os.environ.get('APP_USER')
 USER_PW = os.environ.get('APP_PASS')
 SITE_URL = os.environ.get('APP_URL')
@@ -15,6 +15,10 @@ SIGNATURE = os.environ.get('MAIL_SIGNATURE', 'Best Regards,\nAutomated System')
 
 LOG_FILE = "log_history.txt"
 
+# ฟังก์ชันแปลงชื่อไฟล์เป็นรหัสลับ (Hash)
+def make_hash(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
 def get_history():
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, "r", encoding="utf-8") as f:
@@ -22,8 +26,9 @@ def get_history():
     return set()
 
 def save_history(entry):
+    hashed_entry = make_hash(entry) # แปลงเป็นรหัสก่อนบันทึก
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(entry + "\n")
+        f.write(hashed_entry + "\n")
 
 def notify_chat(title):
     webhook = os.environ.get('CHAT_WEBHOOK')
@@ -57,12 +62,13 @@ def dispatch_email(file_path, details, title):
         if len(TARGET_ADDRS) > 1:
             msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
 
-    # เนื้อหาอีเมล ดึงข้อมูลมาแสดงตามรูปแบบที่คุณพินต้องการ
     body = f"Dear team,\n\n"
     body += f"Category            : {details.get('Category', '-')}\n"
     body += f"Document No.    : {details.get('DocNo', '-')}\n"
     body += f"Published by      : {details.get('Publisher', '-')}\n"
     body += f"Reference          : {details.get('Model', '-')}\n\n"
+    body += "Best Regards,\n\n"
+    body += "-----------------------------------------------------------------\n"
     body += f"{SIGNATURE}"
     
     msg.set_content(body)
@@ -82,7 +88,6 @@ def run_system(pw: Playwright, mode: str):
     browser = pw.chromium.launch(headless=True)
     page = browser.new_page()
     
-    # Login process
     page.goto(SITE_URL)
     page.get_by_role("textbox", name="Username").fill(USER_ID)
     page.get_by_role("textbox", name="Password").fill(USER_PW)
@@ -91,7 +96,6 @@ def run_system(pw: Playwright, mode: str):
     page.get_by_role("link", name="See All").nth(1).click()
     page.wait_for_timeout(5000)
 
-    # Check dates (Last 3 days)
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(3)]
     
     for d in dates:
@@ -108,7 +112,8 @@ def run_system(pw: Playwright, mode: str):
         }}""")
 
         for item_name in items:
-            if item_name in history: continue
+            hashed_item = make_hash(item_name) # แปลงชื่อไฟล์ที่เจอเป็น Hash เพื่อเช็คประวัติ
+            if hashed_item in history: continue
             
             if mode == "check":
                 notify_chat(item_name)
@@ -146,7 +151,7 @@ def run_system(pw: Playwright, mode: str):
                     path = f"/tmp/{dl.value.suggested_filename}"
                     dl.value.save_as(path)
                     dispatch_email(path, info, item_name)
-                    save_history(item_name)
+                    save_history(item_name) # บันทึกแบบ Hash
                     print(f"Successfully sent: {item_name}")
                 page.go_back()
 
