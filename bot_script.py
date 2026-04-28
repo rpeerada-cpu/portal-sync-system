@@ -135,9 +135,9 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                     
                     # จัดรูปแบบ Body ใหม่ให้ดูเป็นระเบียบ
                     body = f"Dear all,\n\n"
-                    body += f"Category        : {info.get('Category', '-')}\n"
-                    body += f"Document No.    : {info.get('DocNo', '-')}\n"
-                    body += f"Published by    : {info.get('Publisher', '-')}\n"
+                    body += f"Category            : {info.get('Category', '-')}\n"
+                    body += f"Document No.     : {info.get('DocNo', '-')}\n"
+                    body += f"Published by       : {info.get('Publisher', '-')}\n"
                     body += f"Model Reference : {info.get('Model', '-')}\n\n"
                     body += f"Best Regards,\n\n------------------------------------------------\n{SIGNATURE}"
                     msg.set_content(body)
