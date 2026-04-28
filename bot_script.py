@@ -35,10 +35,40 @@ def save_history(entry):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(encrypt_name(entry) + "\n")
 
+def notify_chat(new_files):
+    webhook = os.environ.get('CHAT_WEBHOOK')
+    if not webhook or not new_files: return
+    
+    # สร้างลิงก์ตรงไปยังหน้า Issues
+    repo_url = os.environ.get('ACTION_URL', '#').split('/actions')[0]
+    issue_url = f"{repo_url}/issues"
+    
+    file_list_text = "\\n".join([f"• {f}" for f in new_files])
+    
+    payload = {
+        "cardsV2": [{
+            "cardId": "checklistNotify",
+            "card": {
+                "header": { "title": "🔔 พบไฟล์ใหม่!", "subtitle": "กรุณาเลือกไฟล์ที่จะส่ง" },
+                "sections": [{
+                    "widgets": [
+                        { "textParagraph": { "text": f"<b>รายการ:</b>\\n{file_list_text}" } },
+                        { "buttonList": { "buttons": [{
+                            "text": "ไปที่หน้าเลือกไฟล์ (Issues)",
+                            "onClick": { "openLink": { "url": issue_url } }
+                        }] } }
+                    ]
+                }]
+            }
+        }]
+    }
+    requests.post(webhook, json=payload)
+
 def execute(pw: Playwright, mode: str, target_list: list = None):
     history = get_history()
     browser = pw.chromium.launch(headless=True)
-    page = browser.new_page(viewport={'width': 1280, 'height': 1200})
+    context = browser.new_context(viewport={'width': 1280, 'height': 1200})
+    page = context.new_page()
     
     page.goto(SITE_URL)
     page.get_by_role("textbox", name="Username").fill(USER_ID)
@@ -49,9 +79,10 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
     page.wait_for_timeout(7000)
 
     if mode == "check":
-        # ตรวจสอบ 4 วันย้อนหลัง
+        page.screenshot(path="debug_scout.png", full_page=True)
         target_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(4)]
         new_found = []
+        
         links = page.locator("a").all()
         for link in links:
             title = link.inner_text().strip()
@@ -60,32 +91,26 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
             if any(d in parent_text for d in target_dates) and title not in history:
                 new_found.append(title)
         
-        # ส่งค่ากลับไปยัง GitHub Action Output
-        if 'GITHUB_OUTPUT' in os.environ:
-            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                f.write(f"files={json.dumps(new_found)}\n")
-        print(f"Scout done. Found: {new_found}")
+        if new_found:
+            notify_chat(new_found) # แจ้งเตือนแชท
+            if 'GITHUB_OUTPUT' in os.environ:
+                with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                    f.write(f"files={json.dumps(new_found)}\n")
 
     elif mode == "send" and target_list:
         for f_name in target_list:
             try:
-                print(f"🚀 Dispatching: {f_name}")
                 page.get_by_role("link", name=f_name).first.click()
                 page.wait_for_timeout(5000)
                 
-                # Scraping info (Category/Doc No)
                 info = page.evaluate("""() => {
                     let d = {};
                     document.querySelectorAll('tr').forEach(el => {
-                        let text = el.innerText.toLowerCase();
                         let pts = el.innerText.split(':');
                         if (pts.length >= 2) {
                             let k = pts[0].trim().toLowerCase();
-                            let v = pts[1].trim();
-                            if (k.includes('category')) d['Category'] = v;
-                            if (k.includes('document no')) d['DocNo'] = v;
-                            if (k.includes('published by')) d['Publisher'] = v;
-                            if (k.includes('model')) d['Model'] = v;
+                            if (k.includes('category')) d['Category'] = pts[1].trim();
+                            if (k.includes('document no')) d['DocNo'] = pts[1].trim();
                         }
                     });
                     return d;
@@ -101,21 +126,12 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                     path = f"/tmp/{dl.value.suggested_filename}"
                     dl.value.save_as(path)
                     
-                    # Email Logic
                     msg = EmailMessage()
-                    msg['Subject'] = f"Update : {f_name}"
+                    msg['Subject'] = f"Update Bulletin: {f_name}"
                     msg['From'] = formataddr(("Technical Support", MY_ADDR))
                     msg['To'] = TARGET_ADDRS[0]
                     if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
-                    
-                    body = f"Dear all,\n\n"
-                    body += f"Category: {info.get('Category', '-')}\n"
-                    body += f"Doc No: {info.get('DocNo', '-')}\n"
-                    body += f"Publisher: {info.get('Publisher', '-')}\n"
-                    body += f"Model: {info.get('Model', '-')}\n\n"
-                    body += f"Best Regards,\n\n{SIGNATURE}"
-                    msg.set_content(body)
-                    
+                    msg.set_content(f"Category: {info.get('Category', '-')}\nDoc No: {info.get('DocNo', '-')}\n\n{SIGNATURE}")
                     with open(path, 'rb') as att:
                         msg.add_attachment(att.read(), maintype='application', subtype='octet-stream', filename=dl.value.suggested_filename)
                     
@@ -123,13 +139,9 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                         smtp.starttls()
                         smtp.login(MY_ADDR, MY_PW)
                         smtp.send_message(msg)
-                    
                     save_history(f_name)
-                    print(f"✅ Sent: {f_name}")
                 page.go_back()
-            except Exception as e:
-                print(f"❌ Error {f_name}: {e}")
-                page.goto(SITE_URL + "/Listing")
+            except: page.goto(SITE_URL + "/Listing")
 
     browser.close()
 
