@@ -45,10 +45,10 @@ def notify_chat(new_files):
         "cardsV2": [{
             "cardId": "checklistNotify",
             "card": {
-                "header": { "title": "🔔 พบไฟล์ใหม่!", "subtitle": "กรุณาเลือกไฟล์ที่จะส่ง" },
+                "header": { "title": "🔔 พบไฟล์ใหม่!", "subtitle": "Isuzu Portal" },
                 "sections": [{
                     "widgets": [
-                        { "textParagraph": { "text": f"<b>รายการ:</b>\\n{file_list_text}" } },
+                        { "textParagraph": { "text": f"<b>รายการที่รอให้คุณพินเลือก:</b>\\n{file_list_text}" } },
                         { "buttonList": { "buttons": [{
                             "text": "ไปที่หน้าเลือกไฟล์ (Issues)",
                             "onClick": { "openLink": { "url": issue_url } }
@@ -95,21 +95,20 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
         for f_name in target_list:
             try:
                 page.get_by_role("link", name=f_name).first.click()
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(6000)
                 
-                # --- ปรับปรุงการกวาดข้อมูล: ใช้การเช็คแบบแม่นยำสูง (Fix Category/DocNo) ---
+                # --- กลับไปใช้ท่ามาตรฐานที่เคยเวิร์ก (Simple Table Row Scan) ---
                 info = page.evaluate("""() => {
                     let d = {};
-                    document.querySelectorAll('tr').forEach(tr => {
-                        let cells = tr.querySelectorAll('td, th');
+                    let rows = document.querySelectorAll('tr');
+                    rows.forEach(r => {
+                        let cells = r.querySelectorAll('th, td');
                         if (cells.length >= 2) {
-                            // ลบช่องว่างและทำเป็นตัวพิมพ์เล็กเพื่อเปรียบเทียบ
-                            let key = cells[0].innerText.replace(/\\s+/g, '').toLowerCase();
+                            let key = cells[0].innerText.trim().toLowerCase();
                             let val = cells[1].innerText.trim();
-                            
                             if (key.includes('category')) d['Category'] = val;
-                            if (key.includes('documentno')) d['DocNo'] = val;
-                            if (key.includes('publishedby')) d['Publisher'] = val;
+                            if (key.includes('document no')) d['DocNo'] = val;
+                            if (key.includes('published by')) d['Publisher'] = val;
                             if (key.includes('model')) d['Model'] = val;
                         }
                     });
@@ -126,18 +125,17 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                     path = f"/tmp/{dl.value.suggested_filename}"
                     dl.value.save_as(path)
                     
-                    # --- เปลี่ยนชื่อคนส่งเป็น PEERADA ROONGROAJSATAPORN ---
+                    # --- ชื่อคนส่ง: PEERADA ROONGROAJSATAPORN ---
                     msg = EmailMessage()
                     msg['Subject'] = f"Update Bulletin: {f_name}"
                     msg['From'] = formataddr(("PEERADA ROONGROAJSATAPORN", MY_ADDR))
                     msg['To'] = TARGET_ADDRS[0]
                     if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
                     
-                    # จัดรูปแบบ Body ใหม่ให้ดูเป็นระเบียบ
                     body = f"Dear all,\n\n"
-                    body += f"Category            : {info.get('Category', '-')}\n"
-                    body += f"Document No.     : {info.get('DocNo', '-')}\n"
-                    body += f"Published by       : {info.get('Publisher', '-')}\n"
+                    body += f"Category        : {info.get('Category', '-')}\n"
+                    body += f"Document No.    : {info.get('DocNo', '-')}\n"
+                    body += f"Published by    : {info.get('Publisher', '-')}\n"
                     body += f"Model Reference : {info.get('Model', '-')}\n\n"
                     body += f"Best Regards,\n\n------------------------------------------------\n{SIGNATURE}"
                     msg.set_content(body)
