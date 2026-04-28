@@ -1,59 +1,72 @@
-name: Secure Per-File Approval System
+name: Checklist Control System
 
 on:
   schedule:
     - cron: '27 1 * * *'
     - cron: '59 5 * * *'
-  workflow_dispatch:
+  issues:
+    types: [labeled] # ทำงานเมื่อเราติดป้ายให้ใบงาน
 
 jobs:
-  scout:
+  # 1. ตรวจเจอแล้วสร้าง "ใบสั่งงาน" (Checklist)
+  scout-and-create-issue:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    outputs:
-      new_files: ${{ steps.check.outputs.files }} # ต้องชื่อ files ตรงกับใน Python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with: { python-version: '3.9' }
       - name: Setup
         run: pip install playwright requests && playwright install chromium
-      - id: check
-        name: Run Scouting Mode
+      - id: scout
         env:
           APP_USER: ${{ secrets.PORTAL_USERNAME }}
           APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
           APP_URL: ${{ secrets.TARGET_URL }}
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
-          CHAT_WEBHOOK: ${{ secrets.CHAT_WEBHOOK }}
-          ACTION_URL: "https://github.com/${{ github.repository }}/actions"
         run: python bot_script.py --mode check
-
-      - name: Upload Debug Screenshot
-        if: always()
-        uses: actions/upload-artifact@v4
+      
+      - name: Create Issue Checklist
+        if: steps.scout.outputs.file_list != '[]'
+        uses: imjohnbo/issue-action@v3
         with:
-          name: debug-screenshot
-          path: debug_scout.png
-          retention-days: 7
+          title: "📋 New Files Found: ${{ github.event.schedule || 'Manual' }}"
+          body: |
+            พบไฟล์ใหม่ในระบบ Isuzu ครับคุณพิน
+            กรุณา "ติ๊กถูก" หน้าไฟล์ที่ต้องการส่งเมล แล้วติดป้าย **Approved** ให้ใบงานนี้ครับ
+            
+            ${{ steps.scout.outputs.file_list }}
+          labels: "pending"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  dispatch-per-file:
-    needs: scout
-    if: needs.scout.outputs.new_files != '[]' && needs.scout.outputs.new_files != ''
+  # 2. ส่งเมลตามที่ติ๊ก (เมื่อติดป้าย Approved)
+  send-ticked-files:
+    if: github.event.label.name == 'Approved'
     runs-on: ubuntu-latest
-    environment: production
-    strategy:
-      matrix:
-        filename: ${{ fromJson(needs.scout.outputs.new_files) }}
-      max-parallel: 1
     permissions:
       contents: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with: { python-version: '3.9' }
       - name: Setup
         run: pip install playwright requests && playwright install chromium
-      - name: Process Mailing
+      
+      - name: Extract Ticked Files
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body;
+            const matches = body.match(/- \[x\] (.*)/g);
+            if (!matches) return [];
+            const files = matches.map(m => m.replace('- [x] ', '').trim());
+            return files;
+
+      - name: Dispatch Mailing
+        if: steps.extract.outputs.result != '[]'
         env:
           APP_USER: ${{ secrets.PORTAL_USERNAME }}
           APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
@@ -63,11 +76,19 @@ jobs:
           MAIL_PASS: ${{ secrets.SENDER_APP_PASSWORD }}
           MAIL_RECIPIENTS: ${{ secrets.RECIPIENT_LIST }}
           MAIL_SIGNATURE: ${{ secrets.MAIL_SIGNATURE }}
-        run: python bot_script.py --mode send --file "${{ matrix.filename }}"
+        run: |
+          python bot_script.py --mode send --files '${{ steps.extract.outputs.result }}'
+
+      - name: Close Issue
+        run: |
+          gh issue close ${{ github.event.issue.number }} --comment "ส่งเมลเรียบร้อยแล้วครับคุณพิน!"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
       - name: Sync Log
         run: |
-          git config --global user.name "System-Auto-Bot"
+          git config --global user.name "System-Bot"
           git config --global user.email "bot@github.com"
           git add log_history.txt || true
-          git commit -m "Log: Sync History [skip ci]" || true
+          git commit -m "Update history [skip ci]" || true
           git push
