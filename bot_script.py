@@ -4,7 +4,6 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from playwright.sync_api import Playwright, sync_playwright
 
-# Config
 USER_ID = os.environ.get('APP_USER')
 USER_PW = os.environ.get('APP_PASS')
 SITE_URL = os.environ.get('APP_URL')
@@ -28,7 +27,7 @@ def decrypt_name(encoded_text):
 def get_history():
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, "r", encoding="utf-8") as f:
-            return {decrypt_name(line) for line in f.read().splitlines()}
+            return {decrypt_name(line) for line in f.read().splitlines() if line.strip()}
     return set()
 
 def save_history(entry):
@@ -56,32 +55,6 @@ def notify_chat(title, action_url):
     }
     requests.post(webhook, json=payload)
 
-def dispatch_email(file_path, details, title):
-    msg = EmailMessage()
-    msg['Subject'] = f"Service Bulletin Update : {title}"
-    msg['From'] = formataddr(("Technical Support System", MY_ADDR))
-    if TARGET_ADDRS:
-        msg['To'] = TARGET_ADDRS[0]
-        if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
-    
-    body = f"Dear all,\n\n"
-    body += f"Category            : {details.get('Category', '-')}\n"
-    body += f"Document No.    : {details.get('DocNo', '-')}\n"
-    body += f"Published by      : {details.get('Publisher', '-')}\n"
-    body += f"Model Reference  : {details.get('Model', '-')}\n\n"
-    body += f"Best Regards,\n\n------------------------------------------------\n{SIGNATURE}"
-    msg.set_content(body)
-    
-    ctype, _ = mimetypes.guess_type(file_path)
-    maintype, subtype = (ctype or 'application/octet-stream').split('/', 1)
-    with open(file_path, 'rb') as f:
-        msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(file_path))
-
-    with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
-        smtp.starttls()
-        smtp.login(MY_ADDR, MY_PW)
-        smtp.send_message(msg)
-
 def execute(pw: Playwright, mode: str, target_file: str = None):
     history = get_history()
     browser = pw.chromium.launch(headless=True)
@@ -94,37 +67,49 @@ def execute(pw: Playwright, mode: str, target_file: str = None):
     page.get_by_role("link", name="See All").nth(1).click()
     page.wait_for_timeout(5000)
 
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(3)]
+    # ค้นหาวันที่วันนี้และย้อนหลัง 3 วัน
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(4)]
     
     if mode == "check":
+        print(f"Looking for dates: {dates}")
         new_files = []
-        for d in dates:
-            items = page.evaluate(f"() => Array.from(document.querySelectorAll('a')).filter(a => a.closest('tr')?.innerText.includes('{d}')).map(a => a.innerText.trim()).filter(t => t.length > 5 && t !== 'See All')")
-            for item in items:
-                if item not in history: new_files.append(item)
         
-        # ส่งรายชื่อออกไปที่ GitHub Output
-        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-            f.write(f"files={json.dumps(new_files)}\n")
+        # กวาดทุกแถวในตาราง
+        rows = page.locator("tr").all()
+        for row in rows:
+            text = row.inner_text()
+            # ถ้าในแถวนั้นมีวันที่ที่เราต้องการ
+            if any(d in text for d in dates):
+                link = row.locator("a").first
+                if link.count() > 0:
+                    title = link.inner_text().strip()
+                    if title and title != "See All" and len(title) > 5:
+                        if title not in history:
+                            new_files.append(title)
+                            print(f"Found: {title}")
+                        else:
+                            print(f"Already Sent: {title}")
         
-        for f in new_files: notify_chat(f, os.environ.get('ACTION_URL', '#'))
+        if 'GITHUB_OUTPUT' in os.environ:
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"files={json.dumps(new_files)}\n")
         
+        for f in new_files: 
+            notify_chat(f, os.environ.get('ACTION_URL', '#'))
+            
     elif mode == "send" and target_file:
         page.get_by_role("link", name=target_file).first.click()
         page.wait_for_timeout(4000)
         
-        # ปรับปรุงการกวาดข้อมูล (Scraping) ให้แม่นยำขึ้น
         info = page.evaluate("""() => {
             let d = {};
             document.querySelectorAll('tr').forEach(r => {
                 let cells = r.querySelectorAll('th, td');
                 if (cells.length >= 2) {
-                    let key = cells[0].innerText.trim().toLowerCase();
+                    let key = cells[0].innerText.replace(/\\s+/g, ' ').trim().toLowerCase();
                     let val = cells[1].innerText.trim();
                     if (key.includes('category')) d['Category'] = val;
                     if (key.includes('document no')) d['DocNo'] = val;
-                    if (key.includes('published by')) d['Publisher'] = val;
-                    if (key.includes('model') || key.includes('vehicle')) d['Model'] = val;
                 }
             });
             return d;
@@ -139,8 +124,25 @@ def execute(pw: Playwright, mode: str, target_file: str = None):
             
             path = f"/tmp/{dl.value.suggested_filename}"
             dl.value.save_as(path)
-            dispatch_email(path, info, target_file)
+            
+            # ส่งเมล (โค้ดส่วนส่งเมลเดิม)
+            msg = EmailMessage()
+            msg['Subject'] = f"Update : {target_file}"
+            msg['From'] = formataddr(("Admin", os.environ.get('MAIL_USER')))
+            msg['To'] = TARGET_ADDRS[0]
+            if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
+            msg.set_content(f"Category: {info.get('Category', '-')}\nDoc: {info.get('DocNo', '-')}\n\n{SIGNATURE}")
+            
+            with open(path, 'rb') as f:
+                msg.add_attachment(f.read(), maintype='application', subtype='octet-stream', filename=dl.value.suggested_filename)
+            
+            with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
+                smtp.starttls()
+                smtp.login(os.environ.get('MAIL_USER'), os.environ.get('MAIL_PASS'))
+                smtp.send_message(msg)
+            
             save_history(target_file)
+            print(f"Sent: {target_file}")
 
     browser.close()
 
