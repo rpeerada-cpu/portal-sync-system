@@ -2,14 +2,15 @@ name: Data Sync & Approval System
 
 on:
   schedule:
-    - cron: '27 1 * * *'  # 08:27 น. เวลาไทย
-    - cron: '59 5 * * *'  # 12:59 น. เวลาไทย
-  workflow_dispatch:      # ปุ่มกดรันเอง Manual
+    - cron: '27 1 * * *'
+    - cron: '59 5 * * *'
+  workflow_dispatch:
 
 jobs:
-  # --- ด่านที่ 1: ตรวจสอบและแจ้งเตือนเข้า Google Space ---
   scout-update:
     runs-on: ubuntu-latest
+    permissions: # เพิ่มสิทธิ์ตรงนี้เพื่อให้ Job แรกบันทึก log ได้ถ้าจำเป็น
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
@@ -27,18 +28,18 @@ jobs:
           ACTION_URL: "https://github.com/${{ github.repository }}/actions"
         run: python bot_script.py --mode check
 
-  # --- ด่านที่ 2: รอการอนุมัติ (Approve) เพื่อส่งอีเมลจริง ---
   dispatch-process:
     needs: scout-update
     runs-on: ubuntu-latest
-    environment: production # ด่านกักกันที่คุณพินตั้งค่าไว้ใน Settings
+    environment: production
+    permissions: # เพิ่มสิทธิ์ตรงนี้เพื่อให้ Job ส่งเมลบันทึกประวัติลงไฟล์ได้
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with: { python-version: '3.9' }
       - name: Prepare Environment
         run: |
-          # แก้ไข: เพิ่ม requests ในด่านนี้ด้วยเพื่อให้ส่งข้อมูลเข้าแชท/รันสคริปต์ได้ครบถ้วน
           pip install playwright requests
           playwright install chromium
       - name: Run Dispatch Mode
