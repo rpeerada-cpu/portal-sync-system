@@ -47,4 +47,44 @@ jobs:
   # --- Job 2: ด่านกักกันรายไฟล์ (Matrix Approval) ---
   dispatch-per-file:
     needs: scout
-    # รันเฉพาะเมื่อ Job
+    # รันเฉพาะเมื่อ Job แรกเจอไฟล์ใหม่เท่านั้น
+    if: needs.scout.outputs.new_files != '[]' && needs.scout.outputs.new_files != ''
+    runs-on: ubuntu-latest
+    environment: production # ด่านที่คุณพินต้องกด Approve
+    strategy:
+      matrix:
+        filename: ${{ fromJson(needs.scout.outputs.new_files) }}
+      max-parallel: 1 # ค่อยๆ ส่งทีละเมลเพื่อความปลอดภัย
+    permissions:
+      contents: write # สิทธิ์ในการบันทึก Log ลง GitHub
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install Dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium
+          
+      - name: Execute Mailing System
+        env:
+          APP_USER: ${{ secrets.PORTAL_USERNAME }}
+          APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
+          APP_URL: ${{ secrets.TARGET_URL }}
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
+          MAIL_USER: ${{ secrets.SENDER_EMAIL }}
+          MAIL_PASS: ${{ secrets.SENDER_APP_PASSWORD }}
+          MAIL_RECIPIENTS: ${{ secrets.RECIPIENT_LIST }}
+          MAIL_SIGNATURE: ${{ secrets.MAIL_SIGNATURE }}
+        run: python bot_script.py --mode send --file "${{ matrix.filename }}"
+
+      - name: Sync Encrypted Log
+        run: |
+          git config --global user.name "System-Auto-Bot"
+          git config --global user.email "bot@github.com"
+          git add log_history.txt || true
+          git commit -m "Log: Sync Encrypted History [skip ci]" || true
+          git push
