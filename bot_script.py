@@ -97,17 +97,19 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                 page.get_by_role("link", name=f_name).first.click()
                 page.wait_for_timeout(5000)
                 
-                # --- ปรับปรุงการกวาดข้อมูลใหม่เพื่อแก้ปัญหา Category/DocNo หาย ---
+                # --- ปรับปรุงการกวาดข้อมูล: ใช้การเช็คแบบแม่นยำสูง (Fix Category/DocNo) ---
                 info = page.evaluate("""() => {
                     let d = {};
                     document.querySelectorAll('tr').forEach(tr => {
                         let cells = tr.querySelectorAll('td, th');
                         if (cells.length >= 2) {
-                            let key = cells[0].innerText.replace(/\\s+/g, ' ').trim().toLowerCase();
+                            // ลบช่องว่างและทำเป็นตัวพิมพ์เล็กเพื่อเปรียบเทียบ
+                            let key = cells[0].innerText.replace(/\\s+/g, '').toLowerCase();
                             let val = cells[1].innerText.trim();
+                            
                             if (key.includes('category')) d['Category'] = val;
-                            if (key.includes('document no')) d['DocNo'] = val;
-                            if (key.includes('published by')) d['Publisher'] = val;
+                            if (key.includes('documentno')) d['DocNo'] = val;
+                            if (key.includes('publishedby')) d['Publisher'] = val;
                             if (key.includes('model')) d['Model'] = val;
                         }
                     });
@@ -131,7 +133,7 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                     msg['To'] = TARGET_ADDRS[0]
                     if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
                     
-                    # จัดรูปแบบ Body 
+                    # จัดรูปแบบ Body ใหม่ให้ดูเป็นระเบียบ
                     body = f"Dear all,\n\n"
                     body += f"Category        : {info.get('Category', '-')}\n"
                     body += f"Document No.    : {info.get('DocNo', '-')}\n"
