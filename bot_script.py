@@ -38,13 +38,9 @@ def save_history(entry):
 def notify_chat(new_files):
     webhook = os.environ.get('CHAT_WEBHOOK')
     if not webhook or not new_files: return
-    
-    # สร้างลิงก์ตรงไปยังหน้า Issues
     repo_url = os.environ.get('ACTION_URL', '#').split('/actions')[0]
     issue_url = f"{repo_url}/issues"
-    
     file_list_text = "\\n".join([f"• {f}" for f in new_files])
-    
     payload = {
         "cardsV2": [{
             "cardId": "checklistNotify",
@@ -82,7 +78,6 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
         page.screenshot(path="debug_scout.png", full_page=True)
         target_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(4)]
         new_found = []
-        
         links = page.locator("a").all()
         for link in links:
             title = link.inner_text().strip()
@@ -90,9 +85,8 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
             parent_text = page.evaluate("(el) => el.parentElement.parentElement.innerText", link.element_handle())
             if any(d in parent_text for d in target_dates) and title not in history:
                 new_found.append(title)
-        
         if new_found:
-            notify_chat(new_found) # แจ้งเตือนแชท
+            notify_chat(new_found)
             if 'GITHUB_OUTPUT' in os.environ:
                 with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
                     f.write(f"files={json.dumps(new_found)}\n")
@@ -103,14 +97,18 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                 page.get_by_role("link", name=f_name).first.click()
                 page.wait_for_timeout(5000)
                 
+                # --- ปรับปรุงจุดนี้: กวาดข้อมูลแบบละเอียดขึ้น เพื่อไม่ให้ Detail หาย ---
                 info = page.evaluate("""() => {
                     let d = {};
-                    document.querySelectorAll('tr').forEach(el => {
-                        let pts = el.innerText.split(':');
-                        if (pts.length >= 2) {
-                            let k = pts[0].trim().toLowerCase();
-                            if (k.includes('category')) d['Category'] = pts[1].trim();
-                            if (k.includes('document no')) d['DocNo'] = pts[1].trim();
+                    document.querySelectorAll('tr').forEach(tr => {
+                        let cells = tr.querySelectorAll('td, th');
+                        if (cells.length >= 2) {
+                            let key = cells[0].innerText.trim().toLowerCase();
+                            let val = cells[1].innerText.trim();
+                            if (key.includes('category')) d['Category'] = val;
+                            if (key.includes('document no')) d['DocNo'] = val;
+                            if (key.includes('published by')) d['Publisher'] = val;
+                            if (key.includes('model')) d['Model'] = val;
                         }
                     });
                     return d;
@@ -126,12 +124,22 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                     path = f"/tmp/{dl.value.suggested_filename}"
                     dl.value.save_as(path)
                     
+                    # --- แก้ไขชื่อคนส่งเป็น PEERADA ROONGROAJSATAPORN ---
                     msg = EmailMessage()
                     msg['Subject'] = f"Update Bulletin: {f_name}"
-                    msg['From'] = formataddr(("Technical Support", MY_ADDR))
+                    msg['From'] = formataddr(("PEERADA ROONGROAJSATAPORN", MY_ADDR))
                     msg['To'] = TARGET_ADDRS[0]
                     if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
-                    msg.set_content(f"Category: {info.get('Category', '-')}\nDoc No: {info.get('DocNo', '-')}\n\n{SIGNATURE}")
+                    
+                    # จัดรูปแบบ Email Body ให้น่าอ่าน
+                    body = f"Dear all,\n\n"
+                    body += f"Category        : {info.get('Category', '-')}\n"
+                    body += f"Document No.    : {info.get('DocNo', '-')}\n"
+                    body += f"Published by    : {info.get('Publisher', '-')}\n"
+                    body += f"Model Reference : {info.get('Model', '-')}\n\n"
+                    body += f"Best Regards,\n\n------------------------------------------------\n{SIGNATURE}"
+                    msg.set_content(body)
+                    
                     with open(path, 'rb') as att:
                         msg.add_attachment(att.read(), maintype='application', subtype='octet-stream', filename=dl.value.suggested_filename)
                     
@@ -140,6 +148,7 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                         smtp.login(MY_ADDR, MY_PW)
                         smtp.send_message(msg)
                     save_history(f_name)
+                    print(f"✅ Sent: {f_name}")
                 page.go_back()
             except: page.goto(SITE_URL + "/Listing")
 
