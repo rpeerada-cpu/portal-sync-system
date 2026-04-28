@@ -1,4 +1,4 @@
-import os, sys, requests, smtplib, mimetypes, base64, json, re
+import os, sys, requests, smtplib, mimetypes, base64, json
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -48,9 +48,9 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
     page.get_by_role("link", name="See All").nth(1).click()
     page.wait_for_timeout(7000)
 
-    target_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(4)]
-    
     if mode == "check":
+        # ตรวจสอบ 4 วันย้อนหลัง
+        target_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(4)]
         new_found = []
         links = page.locator("a").all()
         for link in links:
@@ -60,8 +60,11 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
             if any(d in parent_text for d in target_dates) and title not in history:
                 new_found.append(title)
         
-        # ส่งรายชื่อออกไปเพื่อสร้าง Checklist ใน Issue
-        print(f"::set-output name=file_list::{json.dumps(new_found)}")
+        # ส่งค่ากลับไปยัง GitHub Action Output
+        if 'GITHUB_OUTPUT' in os.environ:
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"files={json.dumps(new_found)}\n")
+        print(f"Scout done. Found: {new_found}")
 
     elif mode == "send" and target_list:
         for f_name in target_list:
@@ -70,14 +73,19 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                 page.get_by_role("link", name=f_name).first.click()
                 page.wait_for_timeout(5000)
                 
+                # Scraping info (Category/Doc No)
                 info = page.evaluate("""() => {
                     let d = {};
                     document.querySelectorAll('tr').forEach(el => {
+                        let text = el.innerText.toLowerCase();
                         let pts = el.innerText.split(':');
                         if (pts.length >= 2) {
                             let k = pts[0].trim().toLowerCase();
-                            if (k.includes('category')) d['Category'] = pts[1].trim();
-                            if (k.includes('document no')) d['DocNo'] = pts[1].trim();
+                            let v = pts[1].trim();
+                            if (k.includes('category')) d['Category'] = v;
+                            if (k.includes('document no')) d['DocNo'] = v;
+                            if (k.includes('published by')) d['Publisher'] = v;
+                            if (k.includes('model')) d['Model'] = v;
                         }
                     });
                     return d;
@@ -93,12 +101,21 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                     path = f"/tmp/{dl.value.suggested_filename}"
                     dl.value.save_as(path)
                     
+                    # Email Logic
                     msg = EmailMessage()
-                    msg['Subject'] = f"Service Bulletin: {f_name}"
+                    msg['Subject'] = f"Update : {f_name}"
                     msg['From'] = formataddr(("Technical Support", MY_ADDR))
                     msg['To'] = TARGET_ADDRS[0]
                     if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
-                    msg.set_content(f"Category: {info.get('Category', '-')}\nDoc No: {info.get('DocNo', '-')}\n\n{SIGNATURE}")
+                    
+                    body = f"Dear all,\n\n"
+                    body += f"Category: {info.get('Category', '-')}\n"
+                    body += f"Doc No: {info.get('DocNo', '-')}\n"
+                    body += f"Publisher: {info.get('Publisher', '-')}\n"
+                    body += f"Model: {info.get('Model', '-')}\n\n"
+                    body += f"Best Regards,\n\n{SIGNATURE}"
+                    msg.set_content(body)
+                    
                     with open(path, 'rb') as att:
                         msg.add_attachment(att.read(), maintype='application', subtype='octet-stream', filename=dl.value.suggested_filename)
                     
@@ -108,7 +125,7 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                         smtp.send_message(msg)
                     
                     save_history(f_name)
-                    print(f"✅ Success: {f_name}")
+                    print(f"✅ Sent: {f_name}")
                 page.go_back()
             except Exception as e:
                 print(f"❌ Error {f_name}: {e}")
