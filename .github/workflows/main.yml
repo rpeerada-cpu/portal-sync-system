@@ -1,0 +1,60 @@
+name: Automated Approval System
+
+on:
+  schedule:
+    - cron: '27 1 * * *'  # 08:27 น. เวลาไทย
+    - cron: '59 5 * * *'  # 12:59 น. เวลาไทย
+  workflow_dispatch:
+
+jobs:
+  # ด่านที่ 1: ตรวจสอบข้อมูลและแจ้งเตือนเข้าแชท (ทำงานอัตโนมัติ)
+  scout-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with: { python-version: '3.9' }
+      - name: Prepare Environment
+        run: |
+          pip install playwright requests
+          playwright install chromium
+      - name: Run Scouting Mode
+        env:
+          APP_USER: ${{ secrets.PORTAL_USERNAME }}
+          APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
+          APP_URL: ${{ secrets.TARGET_URL }}
+          CHAT_WEBHOOK: ${{ secrets.CHAT_WEBHOOK }}
+          ACTION_URL: "https://github.com/${{ github.repository }}/actions"
+        run: python bot_script.py --mode check
+
+  # ด่านที่ 2: รอการอนุมัติ (คนในทีมต้องมากด Approve) เพื่อส่งอีเมล
+  dispatch-process:
+    needs: scout-update
+    runs-on: ubuntu-latest
+    environment: production # *** ต้องตั้งชื่อ Environment ให้ตรงกับใน Settings ***
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with: { python-version: '3.9' }
+      - name: Prepare Environment
+        run: |
+          pip install playwright
+          playwright install chromium
+      - name: Run Dispatch Mode
+        env:
+          APP_USER: ${{ secrets.PORTAL_USERNAME }}
+          APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
+          APP_URL: ${{ secrets.TARGET_URL }}
+          MAIL_USER: ${{ secrets.SENDER_EMAIL }}
+          MAIL_PASS: ${{ secrets.SENDER_APP_PASSWORD }}
+          MAIL_RECIPIENTS: ${{ secrets.RECIPIENT_LIST }}
+          MAIL_SIGNATURE: ${{ secrets.MAIL_SIGNATURE }}
+        run: python bot_script.py --mode send
+
+      - name: Sync Logs
+        run: |
+          git config --global user.name "System-Auto-Bot"
+          git config --global user.email "bot@github.com"
+          git add log_history.txt || true
+          git commit -m "Update logs [skip ci]" || true
+          git push
