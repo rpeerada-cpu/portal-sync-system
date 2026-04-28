@@ -4,14 +4,17 @@ on:
   schedule:
     - cron: '27 1 * * *'
     - cron: '59 5 * * *'
+  workflow_dispatch: # สำหรับกดรันเพื่อเช็คไฟล์เอง
   issues:
-    types: [labeled] # ทำงานเมื่อเราติดป้ายให้ใบงาน
+    types: [labeled] # ทำงานเมื่อมีการติดป้ายใน Issue
 
 jobs:
-  # 1. ตรวจเจอแล้วสร้าง "ใบสั่งงาน" (Checklist)
+  # --- ด่าน 1: ตรวจหาไฟล์แล้วสร้างใบสั่งงาน ---
   scout-and-create-issue:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    outputs:
+      file_list: ${{ steps.scout.outputs.files }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
@@ -24,23 +27,30 @@ jobs:
           APP_PASS: ${{ secrets.PORTAL_PASSWORD }}
           APP_URL: ${{ secrets.TARGET_URL }}
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
+          CHAT_WEBHOOK: ${{ secrets.CHAT_WEBHOOK }}
         run: python bot_script.py --mode check
-      
-      - name: Create Issue Checklist
-        if: steps.scout.outputs.file_list != '[]'
-        uses: imjohnbo/issue-action@v3
-        with:
-          title: "📋 New Files Found: ${{ github.event.schedule || 'Manual' }}"
-          body: |
-            พบไฟล์ใหม่ในระบบ Isuzu ครับคุณพิน
-            กรุณา "ติ๊กถูก" หน้าไฟล์ที่ต้องการส่งเมล แล้วติดป้าย **Approved** ให้ใบงานนี้ครับ
-            
-            ${{ steps.scout.outputs.file_list }}
-          labels: "pending"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 2. ส่งเมลตามที่ติ๊ก (เมื่อติดป้าย Approved)
+      - name: Create Issue Checklist
+        if: steps.scout.outputs.files != '[]' && steps.scout.outputs.files != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = JSON.parse('${{ steps.scout.outputs.files }}');
+            let body = "### 📋 พบไฟล์ใหม่ในระบบ Isuzu ครับ\n";
+            body += "กรุณา **ติ๊กถูก [x]** หน้าไฟล์ที่ต้องการส่งเมล แล้วติดป้าย **Approved** ที่แถบขวามือครับ\n\n";
+            files.forEach(f => {
+              body += `- [ ] ${f}\n`;
+            });
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `New Files Found: ${new Date().toLocaleDateString()}`,
+              body: body,
+              labels: ['pending']
+            });
+
+  # --- ด่าน 2: ส่งเมลตามที่ติ๊กไว้ (รันเมื่อติดป้าย Approved) ---
   send-ticked-files:
     if: github.event.label.name == 'Approved'
     runs-on: ubuntu-latest
@@ -58,12 +68,14 @@ jobs:
         id: extract
         uses: actions/github-script@v7
         with:
+          result-encoding: string
           script: |
             const body = context.payload.issue.body;
-            const matches = body.match(/- \[x\] (.*)/g);
-            if (!matches) return [];
-            const files = matches.map(m => m.replace('- [x] ', '').trim());
-            return files;
+            const lines = body.split('\n');
+            const ticked = lines
+              .filter(line => line.startsWith('- [x] '))
+              .map(line => line.replace('- [x] ', '').trim());
+            return JSON.stringify(ticked);
 
       - name: Dispatch Mailing
         if: steps.extract.outputs.result != '[]'
@@ -80,8 +92,9 @@ jobs:
           python bot_script.py --mode send --files '${{ steps.extract.outputs.result }}'
 
       - name: Close Issue
+        if: always()
         run: |
-          gh issue close ${{ github.event.issue.number }} --comment "ส่งเมลเรียบร้อยแล้วครับคุณพิน!"
+          gh issue close ${{ github.event.issue.number }} --comment "ดำเนินการส่งเมลตามรายการที่เลือกเรียบร้อยแล้วครับ!"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
