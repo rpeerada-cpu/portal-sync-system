@@ -1,35 +1,28 @@
-import os, sys, requests, smtplib, mimetypes, base64
+import os, sys, requests, smtplib, mimetypes, base64, json
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
 from playwright.sync_api import Playwright, sync_playwright
 
-# Configuration from Secrets
+# Config
 USER_ID = os.environ.get('APP_USER')
 USER_PW = os.environ.get('APP_PASS')
 SITE_URL = os.environ.get('APP_URL')
-KEY = os.environ.get('ENCRYPT_KEY', 'DefaultKey007') # กุญแจล็อกไฟล์
+KEY = os.environ.get('ENCRYPT_KEY', 'DefaultKey007')
 MY_ADDR = os.environ.get('MAIL_USER')
 MY_PW = os.environ.get('MAIL_PASS')
 TARGET_ADDRS = os.environ.get('MAIL_RECIPIENTS', '').split(',')
 SIGNATURE = os.environ.get('MAIL_SIGNATURE', 'Best Regards')
-
 LOG_FILE = "log_history.txt"
 
-# --- ระบบล็อก/ปลดล็อกกุญแจชื่อไฟล์ ---
 def encrypt_name(text):
-    result = ""
-    for i in range(len(text)):
-        result += chr(ord(text[i]) ^ ord(KEY[i % len(KEY)]))
-    return base64.b64encode(result.encode()).decode()
+    res = "".join(chr(ord(text[i]) ^ ord(KEY[i % len(KEY)])) for i in range(len(text)))
+    return base64.b64encode(res.encode()).decode()
 
 def decrypt_name(encoded_text):
     try:
         decoded = base64.b64decode(encoded_text).decode()
-        result = ""
-        for i in range(len(decoded)):
-            result += chr(ord(decoded[i]) ^ ord(KEY[i % len(KEY)]))
-        return result
+        return "".join(chr(ord(decoded[i]) ^ ord(KEY[i % len(KEY)])) for i in range(len(decoded)))
     except: return ""
 
 def get_history():
@@ -42,21 +35,19 @@ def save_history(entry):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(encrypt_name(entry) + "\n")
 
-# --- ระบบแจ้งเตือนและอีเมล ---
-def notify_chat(title):
+def notify_chat(title, action_url):
     webhook = os.environ.get('CHAT_WEBHOOK')
-    repo_link = os.environ.get('ACTION_URL', '#')
     payload = {
         "cardsV2": [{
             "cardId": "approvalCard",
             "card": {
-                "header": { "title": "🔔 พบไฟล์ใหม่รออนุมัติ", "subtitle": "Portal Sync System" },
+                "header": { "title": "🔔 พบไฟล์ใหม่รออนุมัติ", "subtitle": "รายไฟล์" },
                 "sections": [{
                     "widgets": [
                         { "textParagraph": { "text": f"<b>รายการ:</b> {title}" } },
                         { "buttonList": { "buttons": [{
-                            "text": "คลิกเพื่อ APPROVE",
-                            "onClick": { "openLink": { "url": repo_link } }
+                            "text": "คลิกเพื่อไปหน้า APPROVE",
+                            "onClick": { "openLink": { "url": action_url } }
                         }] } }
                     ]
                 }]
@@ -72,17 +63,15 @@ def dispatch_email(file_path, details, title):
     if TARGET_ADDRS:
         msg['To'] = TARGET_ADDRS[0]
         if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
-
+    
     body = f"Dear all,\n\n"
     body += f"Category            : {details.get('Category', '-')}\n"
     body += f"Document No.    : {details.get('DocNo', '-')}\n"
     body += f"Published by      : {details.get('Publisher', '-')}\n"
     body += f"Model Reference  : {details.get('Model', '-')}\n\n"
-    body += "Best Regards,\n\n"
-    body += "-----------------------------------------------------------------\n"
-    body += f"{SIGNATURE}"
-    
+    body += f"Best Regards,\n\n------------------------------------------------\n{SIGNATURE}"
     msg.set_content(body)
+    
     ctype, _ = mimetypes.guess_type(file_path)
     maintype, subtype = (ctype or 'application/octet-stream').split('/', 1)
     with open(file_path, 'rb') as f:
@@ -93,8 +82,7 @@ def dispatch_email(file_path, details, title):
         smtp.login(MY_ADDR, MY_PW)
         smtp.send_message(msg)
 
-# --- ระบบหลัก ---
-def execute(pw: Playwright, mode: str):
+def execute(pw: Playwright, mode: str, target_file: str = None):
     history = get_history()
     browser = pw.chromium.launch(headless=True)
     page = browser.new_page()
@@ -103,70 +91,61 @@ def execute(pw: Playwright, mode: str):
     page.get_by_role("textbox", name="Username").fill(USER_ID)
     page.get_by_role("textbox", name="Password").fill(USER_PW)
     page.get_by_role("button", name="Log In").click()
-    
     page.get_by_role("link", name="See All").nth(1).click()
     page.wait_for_timeout(5000)
 
     dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(3)]
     
-    for d in dates:
-        items = page.evaluate(f"""() => {{
-            let res = [];
-            document.querySelectorAll('a').forEach(a => {{
-                let row = a.closest('tr') || a.parentElement.parentElement;
-                if (row && row.innerText.includes('{d}')) {{
-                    let t = a.innerText.trim();
-                    if (t.length > 5 && t !== 'See All') res.push(t);
-                }}
-            }});
-            return res;
-        }}""")
+    if mode == "check":
+        new_files = []
+        for d in dates:
+            items = page.evaluate(f"() => Array.from(document.querySelectorAll('a')).filter(a => a.closest('tr')?.innerText.includes('{d}')).map(a => a.innerText.trim()).filter(t => t.length > 5 && t !== 'See All')")
+            for item in items:
+                if item not in history: new_files.append(item)
+        
+        # ส่งรายชื่อออกไปที่ GitHub Output
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"files={json.dumps(new_files)}\n")
+        
+        for f in new_files: notify_chat(f, os.environ.get('ACTION_URL', '#'))
+        
+    elif mode == "send" and target_file:
+        page.get_by_role("link", name=target_file).first.click()
+        page.wait_for_timeout(4000)
+        
+        # ปรับปรุงการกวาดข้อมูล (Scraping) ให้แม่นยำขึ้น
+        info = page.evaluate("""() => {
+            let d = {};
+            document.querySelectorAll('tr').forEach(r => {
+                let cells = r.querySelectorAll('th, td');
+                if (cells.length >= 2) {
+                    let key = cells[0].innerText.trim().toLowerCase();
+                    let val = cells[1].innerText.trim();
+                    if (key.includes('category')) d['Category'] = val;
+                    if (key.includes('document no')) d['DocNo'] = val;
+                    if (key.includes('published by')) d['Publisher'] = val;
+                    if (key.includes('model') || key.includes('vehicle')) d['Model'] = val;
+                }
+            });
+            return d;
+        }""")
 
-        for item_name in items:
-            if item_name in history: continue
+        checkboxes = page.locator("input[type='checkbox']")
+        if checkboxes.count() > 0:
+            for i in range(checkboxes.count()): checkboxes.nth(i).check()
+            page.evaluate('document.querySelector(".download_button").removeAttribute("disabled")')
+            with page.expect_download() as dl:
+                page.locator(".download_button").click(force=True)
             
-            if mode == "check":
-                notify_chat(item_name)
-                print(f"Scouted and Notified: {item_name}")
-                sys.exit(0)
-
-            if mode == "send":
-                page.get_by_role("link", name=item_name).first.click()
-                page.wait_for_timeout(4000)
-                
-                info = page.evaluate("""() => {
-                    let d = {};
-                    document.querySelectorAll('table tr').forEach(r => {
-                        let c = r.querySelectorAll('th, td');
-                        if (c.length >= 2) {
-                            let k = c[0].innerText.trim();
-                            let v = c[1].innerText.trim();
-                            if (k.includes('Category')) d['Category'] = v;
-                            if (k.includes('Document No')) d['DocNo'] = v;
-                            if (k.includes('Published by')) d['Publisher'] = v;
-                            if (k.includes('Vehicle Model')) d['Model'] = v;
-                        }
-                    });
-                    return d;
-                }""")
-
-                checkboxes = page.locator("input[type='checkbox']")
-                if checkboxes.count() > 0:
-                    for i in range(checkboxes.count()): checkboxes.nth(i).check()
-                    page.evaluate('document.querySelector(".download_button").removeAttribute("disabled")')
-                    with page.expect_download() as dl:
-                        page.locator(".download_button").click(force=True)
-                    
-                    path = f"/tmp/{dl.value.suggested_filename}"
-                    dl.value.save_as(path)
-                    dispatch_email(path, info, item_name)
-                    save_history(item_name)
-                    print(f"Successfully Dispatched: {item_name}")
-                page.go_back()
+            path = f"/tmp/{dl.value.suggested_filename}"
+            dl.value.save_as(path)
+            dispatch_email(path, info, target_file)
+            save_history(target_file)
 
     browser.close()
 
 if __name__ == "__main__":
-    m = "check"
+    m = "check"; f_name = None
     if "--mode" in sys.argv: m = sys.argv[sys.argv.index("--mode") + 1]
-    with sync_playwright() as playwright: execute(playwright, m)
+    if "--file" in sys.argv: f_name = sys.argv[sys.argv.index("--file") + 1]
+    with sync_playwright() as playwright: execute(playwright, m, f_name)
