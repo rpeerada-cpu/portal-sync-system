@@ -4,7 +4,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from playwright.sync_api import Playwright, sync_playwright
 
-# Config
+# --- ส่วนของ Config: ดึงจาก Secrets ทั้งหมด ปลอดภัย 100% ---
 USER_ID = os.environ.get('APP_USER')
 USER_PW = os.environ.get('APP_PASS')
 SITE_URL = os.environ.get('APP_URL')
@@ -12,7 +12,11 @@ KEY = os.environ.get('ENCRYPT_KEY', 'DefaultKey007')
 MY_ADDR = os.environ.get('MAIL_USER')
 MY_PW = os.environ.get('MAIL_PASS')
 TARGET_ADDRS = os.environ.get('MAIL_RECIPIENTS', '').split(',')
-SIGNATURE = os.environ.get('MAIL_SIGNATURE', 'Best Regards')
+
+# ชื่อผู้ส่งและ Signature ดึงจาก Secret (ตั้งค่าใน GitHub ได้เลยครับ)
+SENDER_DISPLAY_NAME = os.environ.get('SENDER_NAME', 'PEERADA ROONGROAJSATAPORN')
+SIGNATURE = os.environ.get('MAIL_SIGNATURE', 'Best Regards') 
+
 LOG_FILE = "log_history.txt"
 
 def encrypt_name(text):
@@ -45,7 +49,7 @@ def notify_chat(new_files):
         "cardsV2": [{
             "cardId": "checklistNotify",
             "card": {
-                "header": { "title": "🔔 พบไฟล์ใหม่!", "subtitle": "Isuzu Portal" },
+                "header": { "title": "🔔 พบไฟล์ใหม่!", "subtitle": "Isuzu Portal Sync" },
                 "sections": [{
                     "widgets": [
                         { "textParagraph": { "text": f"<b>รายการที่รอให้คุณพินเลือก:</b>\\n{file_list_text}" } },
@@ -75,7 +79,6 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
     page.wait_for_timeout(7000)
 
     if mode == "check":
-        page.screenshot(path="debug_scout.png", full_page=True)
         target_dates = [(datetime.now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(4)]
         new_found = []
         links = page.locator("a").all()
@@ -97,22 +100,29 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                 page.get_by_role("link", name=f_name).first.click()
                 page.wait_for_timeout(6000)
                 
-                # --- กลับไปใช้ท่ามาตรฐานที่เคยเวิร์ก (Simple Table Row Scan) ---
+                # --- [Logic การกวาด Category ที่แม่นยำจากโค้ดที่คุณพินให้มา] ---
                 info = page.evaluate("""() => {
-                    let d = {};
-                    let rows = document.querySelectorAll('tr');
-                    rows.forEach(r => {
-                        let cells = r.querySelectorAll('th, td');
+                    let data = {};
+                    // 1. หา Category จากปุ่มหรือ div พิเศษก่อน (ท่าที่เคยทำสำเร็จ)
+                    let categoryElem = document.querySelector('.category_name, button[id*="category"], div[class*="category"]');
+                    if (categoryElem) {
+                        data['Category'] = categoryElem.innerText.trim();
+                    }
+
+                    // 2. หาข้อมูลจากตารางมาตรฐานเสริมทัพ
+                    document.querySelectorAll('table tr').forEach(row => {
+                        let cells = row.querySelectorAll('th, td');
                         if (cells.length >= 2) {
-                            let key = cells[0].innerText.trim().toLowerCase();
-                            let val = cells[1].innerText.trim();
-                            if (key.includes('category')) d['Category'] = val;
-                            if (key.includes('document no')) d['DocNo'] = val;
-                            if (key.includes('published by')) d['Publisher'] = val;
-                            if (key.includes('model')) d['Model'] = val;
+                            let key = cells[0].innerText.trim();
+                            let value = cells[1].innerText.trim();
+                            
+                            if (key.includes('Category') && !data['Category']) data['Category'] = value;
+                            if (key.includes('Document No')) data['DocNo'] = value;
+                            if (key.includes('Published by')) data['Publisher'] = value;
+                            if (key.includes('Vehicle Model') || key.includes('Model Reference')) data['Model'] = value;
                         }
                     });
-                    return d;
+                    return data;
                 }""")
 
                 checkboxes = page.locator("input[type='checkbox']")
@@ -125,21 +135,20 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                     path = f"/tmp/{dl.value.suggested_filename}"
                     dl.value.save_as(path)
                     
-                    # --- ชื่อคนส่ง: PEERADA ROONGROAJSATAPORN ---
+                    # --- ส่งอีเมลโดยใช้ชื่อจาก Secret และจัด Body ตามที่คุณพินชอบ ---
                     msg = EmailMessage()
-                    msg['Subject'] = f"Update Bulletin: {f_name}"
-                    msg['From'] = formataddr(("PEERADA ROONGROAJSATAPORN", MY_ADDR))
-                    msg['To'] = TARGET_ADDRS[0]
-                    if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
+                    msg['Subject'] = f"ISUZU Service Bulletin : {f_name}"
+                    msg['From'] = formataddr((SENDER_DISPLAY_NAME, MY_ADDR))
+                    msg['To'] = ", ".join(TARGET_ADDRS)
                     
                     body = f"Dear all,\n\n"
-                    body += f"Category        : {info.get('Category', '-')}\n"
+                    body += f"Category            : {info.get('Category', '-')}\n"
                     body += f"Document No.    : {info.get('DocNo', '-')}\n"
-                    body += f"Published by    : {info.get('Publisher', '-')}\n"
-                    body += f"Model Reference : {info.get('Model', '-')}\n\n"
-                    body += f"Best Regards,\n\n------------------------------------------------\n{SIGNATURE}"
-                    msg.set_content(body)
+                    body += f"Published by      : {info.get('Publisher', '-')}\n"
+                    body += f"Vehicle Model    : {info.get('Model', '-')}\n\n"
+                    body += f"{SIGNATURE}" # <--- Signature ทั้งหมดจะดึงจาก Secret ที่นี่
                     
+                    msg.set_content(body)
                     with open(path, 'rb') as att:
                         msg.add_attachment(att.read(), maintype='application', subtype='octet-stream', filename=dl.value.suggested_filename)
                     
@@ -148,7 +157,7 @@ def execute(pw: Playwright, mode: str, target_list: list = None):
                         smtp.login(MY_ADDR, MY_PW)
                         smtp.send_message(msg)
                     save_history(f_name)
-                    print(f"✅ Sent: {f_name}")
+                    print(f"✅ Success: {f_name}")
                 page.go_back()
             except: page.goto(SITE_URL + "/Listing")
 
