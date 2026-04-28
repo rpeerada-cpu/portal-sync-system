@@ -1,35 +1,48 @@
-import os, sys, requests, smtplib, mimetypes, hashlib # เพิ่ม hashlib เข้ามา
+import os, sys, requests, smtplib, mimetypes, base64
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr
 from playwright.sync_api import Playwright, sync_playwright
 
-# Configuration
+# Configuration from Secrets
 USER_ID = os.environ.get('APP_USER')
 USER_PW = os.environ.get('APP_PASS')
 SITE_URL = os.environ.get('APP_URL')
+KEY = os.environ.get('ENCRYPT_KEY', 'DefaultKey007') # กุญแจล็อกไฟล์
 MY_ADDR = os.environ.get('MAIL_USER')
 MY_PW = os.environ.get('MAIL_PASS')
 TARGET_ADDRS = os.environ.get('MAIL_RECIPIENTS', '').split(',')
-SIGNATURE = os.environ.get('MAIL_SIGNATURE', 'Best Regards,\nAutomated System')
+SIGNATURE = os.environ.get('MAIL_SIGNATURE', 'Best Regards')
 
 LOG_FILE = "log_history.txt"
 
-# ฟังก์ชันแปลงชื่อไฟล์เป็นรหัสลับ (Hash)
-def make_hash(text):
-    return hashlib.sha256(text.encode()).hexdigest()
+# --- ระบบล็อก/ปลดล็อกกุญแจชื่อไฟล์ ---
+def encrypt_name(text):
+    result = ""
+    for i in range(len(text)):
+        result += chr(ord(text[i]) ^ ord(KEY[i % len(KEY)]))
+    return base64.b64encode(result.encode()).decode()
+
+def decrypt_name(encoded_text):
+    try:
+        decoded = base64.b64decode(encoded_text).decode()
+        result = ""
+        for i in range(len(decoded)):
+            result += chr(ord(decoded[i]) ^ ord(KEY[i % len(KEY)]))
+        return result
+    except: return ""
 
 def get_history():
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, "r", encoding="utf-8") as f:
-            return set(f.read().splitlines())
+            return {decrypt_name(line) for line in f.read().splitlines()}
     return set()
 
 def save_history(entry):
-    hashed_entry = make_hash(entry) # แปลงเป็นรหัสก่อนบันทึก
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(hashed_entry + "\n")
+        f.write(encrypt_name(entry) + "\n")
 
+# --- ระบบแจ้งเตือนและอีเมล ---
 def notify_chat(title):
     webhook = os.environ.get('CHAT_WEBHOOK')
     repo_link = os.environ.get('ACTION_URL', '#')
@@ -37,12 +50,12 @@ def notify_chat(title):
         "cardsV2": [{
             "cardId": "approvalCard",
             "card": {
-                "header": { "title": "🔔 New Update Pending", "subtitle": "Scouting System" },
+                "header": { "title": "🔔 พบไฟล์ใหม่รออนุมัติ", "subtitle": "Portal Sync System" },
                 "sections": [{
                     "widgets": [
-                        { "textParagraph": { "text": f"<b>Found:</b> {title}" } },
+                        { "textParagraph": { "text": f"<b>รายการ:</b> {title}" } },
                         { "buttonList": { "buttons": [{
-                            "text": "REVIEW & APPROVE",
+                            "text": "คลิกเพื่อ APPROVE",
                             "onClick": { "openLink": { "url": repo_link } }
                         }] } }
                     ]
@@ -54,25 +67,22 @@ def notify_chat(title):
 
 def dispatch_email(file_path, details, title):
     msg = EmailMessage()
-    msg['Subject'] = f"Update Notification : {title}"
-    msg['From'] = formataddr(("Technical Admin System", MY_ADDR))
-    
+    msg['Subject'] = f"Service Bulletin Update : {title}"
+    msg['From'] = formataddr(("Technical Support System", MY_ADDR))
     if TARGET_ADDRS:
         msg['To'] = TARGET_ADDRS[0]
-        if len(TARGET_ADDRS) > 1:
-            msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
+        if len(TARGET_ADDRS) > 1: msg['Cc'] = ", ".join(TARGET_ADDRS[1:])
 
-    body = f"Dear team,\n\n"
+    body = f"Dear all,\n\n"
     body += f"Category            : {details.get('Category', '-')}\n"
     body += f"Document No.    : {details.get('DocNo', '-')}\n"
     body += f"Published by      : {details.get('Publisher', '-')}\n"
-    body += f"Reference          : {details.get('Model', '-')}\n\n"
+    body += f"Model Reference  : {details.get('Model', '-')}\n\n"
     body += "Best Regards,\n\n"
     body += "-----------------------------------------------------------------\n"
     body += f"{SIGNATURE}"
     
     msg.set_content(body)
-    
     ctype, _ = mimetypes.guess_type(file_path)
     maintype, subtype = (ctype or 'application/octet-stream').split('/', 1)
     with open(file_path, 'rb') as f:
@@ -83,7 +93,8 @@ def dispatch_email(file_path, details, title):
         smtp.login(MY_ADDR, MY_PW)
         smtp.send_message(msg)
 
-def run_system(pw: Playwright, mode: str):
+# --- ระบบหลัก ---
+def execute(pw: Playwright, mode: str):
     history = get_history()
     browser = pw.chromium.launch(headless=True)
     page = browser.new_page()
@@ -112,13 +123,11 @@ def run_system(pw: Playwright, mode: str):
         }}""")
 
         for item_name in items:
-            hashed_item = make_hash(item_name) # แปลงชื่อไฟล์ที่เจอเป็น Hash เพื่อเช็คประวัติ
-            if hashed_item in history: continue
+            if item_name in history: continue
             
             if mode == "check":
                 notify_chat(item_name)
-                print(f"Scouted: {item_name}")
-                browser.close()
+                print(f"Scouted and Notified: {item_name}")
                 sys.exit(0)
 
             if mode == "send":
@@ -151,8 +160,8 @@ def run_system(pw: Playwright, mode: str):
                     path = f"/tmp/{dl.value.suggested_filename}"
                     dl.value.save_as(path)
                     dispatch_email(path, info, item_name)
-                    save_history(item_name) # บันทึกแบบ Hash
-                    print(f"Successfully sent: {item_name}")
+                    save_history(item_name)
+                    print(f"Successfully Dispatched: {item_name}")
                 page.go_back()
 
     browser.close()
@@ -160,4 +169,4 @@ def run_system(pw: Playwright, mode: str):
 if __name__ == "__main__":
     m = "check"
     if "--mode" in sys.argv: m = sys.argv[sys.argv.index("--mode") + 1]
-    with sync_playwright() as playwright: run_system(playwright, m)
+    with sync_playwright() as playwright: execute(playwright, m)
